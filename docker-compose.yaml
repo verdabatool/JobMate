@@ -1,0 +1,89 @@
+services:
+  postgres:
+    container_name: jobmate-cacheaware-postgres
+    image: postgres:13
+    restart: always
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres-db-volume:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"   # Host 5433 -> Container 5432
+    networks:
+      - airflow_net
+
+  jobmate-cacheaware-airflow-webserver:
+    container_name: jobmate-cacheaware-airflow-webserver
+    build:
+      context: .
+      dockerfile: dockerfile
+    restart: always
+    depends_on:
+      - postgres
+    env_file:
+      - .env
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+      AIRFLOW__CORE__FERNET_KEY: CWZpL5LQGBfb-9A41OucQxS6kesDx3ZwDzLc6MSRh9o=
+      PYTHONPATH: /opt/airflow:/opt/airflow/backend
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/logs:/opt/airflow/logs
+      - ./airflow/plugins:/opt/airflow/plugins
+      - ./backend:/opt/airflow/backend
+      - ./data:/opt/airflow/data
+      - ./mlruns:/mlruns
+      - ./secrets/kaggle:/home/airflow/.config/kaggle
+    ports:
+      - "8081:8080"   # Host 8081 -> Container 8080
+    command: webserver
+    networks:
+      - airflow_net
+
+  airflow-scheduler:
+    container_name: jobmate-cacheaware-airflow-scheduler
+    build:
+      context: .
+      dockerfile: dockerfile
+    restart: always
+    depends_on:
+      - jobmate-cacheaware-airflow-webserver
+    env_file:
+      - .env
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+      AIRFLOW__CORE__FERNET_KEY: CWZpL5LQGBfb-9A41OucQxS6kesDx3ZwDzLc6MSRh9o=
+      PYTHONPATH: /opt/airflow:/opt/airflow/backend
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/logs:/opt/airflow/logs
+      - ./airflow/plugins:/opt/airflow/plugins
+      - ./backend:/opt/airflow/backend
+      - ./data:/opt/airflow/data
+      - ./mlruns:/mlruns
+      - ./secrets/kaggle:/home/airflow/.config/kaggle
+    command: scheduler
+    networks:
+      - airflow_net
+
+  mlflow-server:
+    container_name: jobmate-cacheaware-mlflow-server
+    image: ghcr.io/mlflow/mlflow:latest
+    restart: always
+    volumes:
+      - ./mlruns:/mlruns
+    ports:
+      - "5501:5000"   # Host 5501 -> Container 5000
+    command: mlflow server --backend-store-uri sqlite:///mlruns/mlflow.db --default-artifact-root /mlruns --host 0.0.0.0 --port 5000
+    networks:
+      - airflow_net
+
+volumes:
+  postgres-db-volume:
+
+networks:
+  airflow_net:

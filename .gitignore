@@ -1,0 +1,43 @@
+_env/
+# Python bytecode files
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+_env/
+venv/
+ENV/
+env/
+
+# Airflow logs, plugins, and dags cache
+airflow/logs/
+airflow/plugins/
+airflow/dags/__pycache__/
+
+# MLflow experiment tracking files
+mlruns/
+
+# Data files and intermediate artifacts
+data/
+*.csv
+*.parquet
+*.zip
+
+# Secrets and sensitive files
+secrets/
+*.json
+.env
+
+# Docker related
+*.log
+docker-compose.override.yaml
+
+# IDE and system files
+.DS_Store
+.vscode/
+
+# Temporary or swap files
+*.swp
+*.bak
+*.tmp
+~$*
