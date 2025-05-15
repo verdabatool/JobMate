@@ -5,6 +5,7 @@ import boto3
 import hashlib
 import faiss
 import requests
+import mlflow
 from sentence_transformers import SentenceTransformer
 from bs4 import BeautifulSoup
 from kaggle.api.kaggle_api_extended import KaggleApi
@@ -134,7 +135,6 @@ def clean_glassdoor_data_and_upload_to_s3():
         raise
 
 
-
 def scrape_and_upload(source_name, api_url, records_fn):
     response = requests.get(api_url, headers={'User-Agent': 'Mozilla/5.0'})
     jobs = records_fn(response)
@@ -190,9 +190,34 @@ def scrape_adzuna():
 
     upload_to_s3(path, f"{DYNAMIC_SOURCES_PREFIX}adzuna/adzuna.parquet", cleanup=True)
 
+def ensure_file_or_download(file_path, s3_key):
+    if not os.path.isfile(file_path):
+        print(f"[Info] {file_path} not found locally. Attempting to download from S3...")
+        s3 = boto3.client('s3',
+                          aws_access_key_id=AWS_ACCESS_KEY_ID,
+                          aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+                          region_name=AWS_REGION)
+        try:
+            s3.download_file(S3_BUCKET, s3_key, file_path)
+            print(f"[Info] Downloaded {file_path} from S3.")
+        except Exception as e:
+            raise FileNotFoundError(f"Failed to download {file_path} from S3: {e}")
+
 # ----------------- Merging & Hash Checking -----------------
 def merge_all_sources_and_save():
+
+
+    mlflow.set_tracking_uri("http://mlflow-server:5000")  
+    mlflow.set_experiment("glassdoor_jobmate_recommender")
+
+    # ✅ Ensure files locally or download from S3
+    ensure_file_or_download(LOCAL_CLEAN_FILE, f"{PROCESSED_S3_PREFIX}glassdoor_cleaned.parquet")
+    ensure_file_or_download(f"{LOCAL_DATA_FOLDER}/remoteok.parquet", f"{DYNAMIC_SOURCES_PREFIX}remoteok/remoteok.parquet")
+    ensure_file_or_download(f"{LOCAL_DATA_FOLDER}/remotive.parquet", f"{DYNAMIC_SOURCES_PREFIX}remotive/remotive.parquet")
+    ensure_file_or_download(f"{LOCAL_DATA_FOLDER}/adzuna.parquet", f"{DYNAMIC_SOURCES_PREFIX}adzuna/adzuna.parquet")
+
     df_glassdoor = pd.read_parquet(LOCAL_CLEAN_FILE)
+    df_glassdoor = df_glassdoor.rename(columns={"firm": "company"})
     df_glassdoor['description'] = df_glassdoor['content']
     df_glassdoor['tags'] = ""
     df_glassdoor['url'] = ""
@@ -213,12 +238,23 @@ def merge_all_sources_and_save():
     upload_to_s3(LOCAL_HASH_FILE, "features/merged_jobs.hash")
 
 def check_if_new_data():
+    s3 = s3_client()
     try:
+        # Check if hash exists and compare
         download_from_s3("features/merged_jobs.hash", LOCAL_HASH_FILE)
         existing_hash = open(LOCAL_HASH_FILE).read()
         new_hash = file_md5(LOCAL_MERGED_PARQUET)
-        return existing_hash != new_hash
-    except:
+        if existing_hash != new_hash:
+            print("✅ Data has changed, will process new data.")
+            return True  # Data changed
+        else:
+            # Extra check: Does FAISS index exist?
+            s3.head_object(Bucket=S3_BUCKET, Key="models/faiss_index.bin")
+            print("✅ Data unchanged and FAISS index exists, will recommend using existing.")
+            return False  # Data unchanged and index exists
+    except s3.exceptions.ClientError as e:
+        # Missing either hash or FAISS index triggers full rebuild
+        print("⚠️ Hash or FAISS index missing in S3. Will process new data.")
         return True
 
 # ----------------- Embeddings & FAISS -----------------
