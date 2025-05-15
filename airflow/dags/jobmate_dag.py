@@ -13,7 +13,8 @@ from backend.jobmate_full_pipeline_refactored import (
     merge_all_sources_and_save,
     generate_and_cache_embeddings,
     build_faiss_index,
-    check_if_new_data
+    check_if_new_data,
+    recommend_jobs_faiss
 )
 
 default_args = {
@@ -25,13 +26,13 @@ default_args = {
 with DAG(
     'jobmate_full_pipeline_refactored',
     default_args=default_args,
-    description='End-to-End Jobmate Pipeline with FAISS & Smart Caching',
+    description='End-to-End Jobmate Pipeline with FAISS & Smart Caching (Cache Aware Recommendation)',
     schedule_interval=None,
     start_date=days_ago(1),
     tags=['jobmate', 'glassdoor', 'recommendation', 'faiss', 'cache-aware'],
 ) as dag:
 
-    # Phase 1: Data Ingestion and Preprocessing
+    # ----------------- Phase 1: Data Ingestion and Preprocessing -----------------
     task_download_kaggle = PythonOperator(
         task_id='download_from_kaggle',
         python_callable=download_from_kaggle,
@@ -62,22 +63,22 @@ with DAG(
         python_callable=scrape_adzuna,
     )
 
-    # Phase 2: Merge all sources
+    # ----------------- Phase 2: Merge all sources -----------------
     task_merge_sources = PythonOperator(
         task_id='merge_all_sources_and_save',
         python_callable=merge_all_sources_and_save,
     )
 
-    # Phase 3: Smart change detection via BranchPythonOperator
+    # ----------------- Phase 3: Smart change detection -----------------
     def _check_if_new_data():
-        return 'generate_and_cache_embeddings' if check_if_new_data() else 'end_of_pipeline'
+        return 'generate_and_cache_embeddings' if check_if_new_data() else 'recommend_jobs_with_existing_faiss'
 
     task_check_if_new_data = BranchPythonOperator(
         task_id='check_if_new_data',
         python_callable=_check_if_new_data,
     )
 
-    # Phase 4: Embeddings and FAISS Index build if new data
+    # ----------------- Phase 4: Embeddings and FAISS Index build if new data -----------------
     task_generate_embeddings = PythonOperator(
         task_id='generate_and_cache_embeddings',
         python_callable=generate_and_cache_embeddings,
@@ -88,13 +89,30 @@ with DAG(
         python_callable=build_faiss_index,
     )
 
-    # Phase 5: End pipeline if no changes detected
-    task_end_of_pipeline = PythonOperator(
-        task_id='end_of_pipeline',
-        python_callable=lambda: print("✅ No new data detected. Pipeline finished gracefully."),
+    # ----------------- Phase 5a: Recommend jobs using newly built FAISS -----------------
+    def recommend_jobs_with_new_data():
+        user_query = "Software Engineer remote flexible work"
+        recommendations = recommend_jobs_faiss(user_query)
+        print("✅ Recommended Jobs with NEW data:\n", recommendations[["job_title", "company", "url", "score"]])
+
+    task_recommend_jobs_with_new = PythonOperator(
+        task_id='recommend_jobs_with_new_faiss',
+        python_callable=recommend_jobs_with_new_data,
     )
 
-    # DAG Dependencies flow
+    # ----------------- Phase 5b: Recommend jobs using existing FAISS (without rebuild) -----------------
+    def recommend_jobs_with_existing_data():
+        user_query = "Software Engineer remote flexible work"
+        recommendations = recommend_jobs_faiss(user_query)
+        print("✅ Recommended Jobs with EXISTING data:\n", recommendations[["job_title", "company", "url", "score"]])
+
+    task_recommend_jobs_with_existing = PythonOperator(
+        task_id='recommend_jobs_with_existing_faiss',
+        python_callable=recommend_jobs_with_existing_data,
+    )
+
+    # ----------------- DAG Dependencies -----------------
+    # Ingestion & preprocessing flow
     (
         task_download_kaggle
         >> task_upload_raw_to_s3
@@ -104,6 +122,8 @@ with DAG(
         >> task_check_if_new_data
     )
 
-    task_check_if_new_data >> task_generate_embeddings >> task_build_faiss_index
-    task_check_if_new_data >> task_end_of_pipeline
+    # If new data → Embeddings → Build FAISS → Recommend (new)
+    task_check_if_new_data >> task_generate_embeddings >> task_build_faiss_index >> task_recommend_jobs_with_new
 
+    # If no change → Direct recommend using existing FAISS
+    task_check_if_new_data >> task_recommend_jobs_with_existing

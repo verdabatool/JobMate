@@ -7,16 +7,14 @@ import faiss
 import requests
 from sentence_transformers import SentenceTransformer
 from bs4 import BeautifulSoup
-import zipfile
 from kaggle.api.kaggle_api_extended import KaggleApi
-from sklearn.metrics.pairwise import cosine_similarity
-import mlflow
 
-# Environment variables
+# ----------------- Config & Paths -----------------
 S3_BUCKET = os.getenv("S3_BUCKET_NAME")
 AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
 AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
 AWS_REGION = os.getenv("AWS_DEFAULT_REGION")
+
 KAGGLE_DATASET = "davidgauthier/glassdoor-job-reviews"
 RAW_S3_PREFIX = "raw/"
 PROCESSED_S3_PREFIX = "processed/"
@@ -29,12 +27,13 @@ os.makedirs(LOCAL_DATA_FOLDER, exist_ok=True)
 # File paths
 LOCAL_RAW_FILE = f"{LOCAL_DATA_FOLDER}/glassdoor_reviews.csv"
 LOCAL_CLEAN_FILE = f"{LOCAL_DATA_FOLDER}/glassdoor_cleaned.parquet"
-LOCAL_MERGED_CSV = f"{LOCAL_DATA_FOLDER}/merged_jobs.csv"
+LOCAL_MERGED_PARQUET = f"{LOCAL_DATA_FOLDER}/merged_jobs.parquet"
 LOCAL_HASH_FILE = f"{LOCAL_DATA_FOLDER}/merged_jobs.hash"
 LOCAL_EMBEDDINGS = f"{LOCAL_DATA_FOLDER}/embeddings.npy"
 LOCAL_METADATA = f"{LOCAL_DATA_FOLDER}/metadata.csv"
 LOCAL_FAISS_INDEX = f"{LOCAL_DATA_FOLDER}/faiss_index.bin"
 
+# ----------------- Utilities -----------------
 def s3_client():
     return boto3.client('s3',
                         aws_access_key_id=AWS_ACCESS_KEY_ID,
@@ -42,22 +41,19 @@ def s3_client():
                         region_name=AWS_REGION)
 
 def upload_to_s3(local_file, s3_key, cleanup=False):
-    s3 = boto3.client('s3',
-                      aws_access_key_id=AWS_ACCESS_KEY_ID,
-                      aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
-                      region_name=AWS_REGION)
+    s3 = s3_client()
     try:
         s3.upload_file(local_file, S3_BUCKET, s3_key)
-        print(f"Uploaded {local_file} to s3://{S3_BUCKET}/{s3_key}")
+        print(f"✅ Uploaded {local_file} to s3://{S3_BUCKET}/{s3_key}")
         if cleanup:
             os.remove(local_file)
-            print(f"Local file {local_file} deleted after upload.")
+            print(f"🗑 Local file {local_file} deleted after upload.")
     except Exception as e:
-        raise Exception(f"Error uploading {local_file} to S3: {e}")
+        raise Exception(f"❌ Error uploading {local_file} to S3: {e}")
 
 def download_from_s3(s3_key, local_file):
     s3_client().download_file(S3_BUCKET, s3_key, local_file)
-    print(f"Downloaded {s3_key} to {local_file}")
+    print(f"✅ Downloaded {s3_key} to {local_file}")
 
 def file_md5(file_path):
     hash_md5 = hashlib.md5()
@@ -66,8 +62,7 @@ def file_md5(file_path):
             hash_md5.update(chunk)
     return hash_md5.hexdigest()
 
-# ---------------- Ingestion & Preprocessing ----------------
-
+# ----------------- Ingestion & Preprocessing -----------------
 def download_from_kaggle():
     api = KaggleApi()
     api.authenticate()
@@ -108,7 +103,6 @@ def download_from_kaggle():
     except UnicodeDecodeError:
         df = pd.read_csv(csv_file, engine='python', on_bad_lines='skip', encoding='latin1')
 
-
 def upload_raw_to_s3():
     if not os.path.isfile(LOCAL_RAW_FILE):
         raise FileNotFoundError(f"File {LOCAL_RAW_FILE} does not exist. files in {LOCAL_DATA_FOLDER}: {os.listdir(LOCAL_DATA_FOLDER)}")
@@ -139,6 +133,16 @@ def clean_glassdoor_data_and_upload_to_s3():
         print(f"❌ Error in cleaning Glassdoor data: {e}")
         raise
 
+
+
+def scrape_and_upload(source_name, api_url, records_fn):
+    response = requests.get(api_url, headers={'User-Agent': 'Mozilla/5.0'})
+    jobs = records_fn(response)
+    df = pd.DataFrame(jobs)
+    local_file = f"{LOCAL_DATA_FOLDER}/{source_name}.parquet"
+    df.to_parquet(local_file, index=False)
+    upload_to_s3(local_file, f"{DYNAMIC_SOURCES_PREFIX}{source_name}/{source_name}.parquet")
+
 def scrape_remoteok():
     url = "https://remoteok.com/api"
     response = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'})
@@ -149,8 +153,9 @@ def scrape_remoteok():
                 "tags": ", ".join(job.get("tags", [])),
                 "url": job.get("url", "")} for job in jobs]
     df = pd.DataFrame(records)
-    df.to_parquet(f"{LOCAL_DATA_FOLDER}/remoteok.parquet", index=False)
-    upload_to_s3(f"{LOCAL_DATA_FOLDER}/remoteok.parquet", "dynamic_updates/remoteok/remoteok.parquet", cleanup=False)
+    path = f"{LOCAL_DATA_FOLDER}/remoteok.parquet"
+    df.to_parquet(path, index=False)
+    upload_to_s3(path, f"{DYNAMIC_SOURCES_PREFIX}remoteok/remoteok.parquet", cleanup=True)
 
 def scrape_remotive():
     url = "https://remotive.com/api/remote-jobs"
@@ -162,8 +167,9 @@ def scrape_remotive():
                 "tags": ", ".join(job.get("tags", [])),
                 "url": job.get("url", "")} for job in jobs]
     df = pd.DataFrame(records)
-    df.to_parquet(f"{LOCAL_DATA_FOLDER}/remotive.parquet", index=False)
-    upload_to_s3(f"{LOCAL_DATA_FOLDER}/remotive.parquet", "dynamic_updates/remotive/remotive.parquet", cleanup=False)
+    path = f"{LOCAL_DATA_FOLDER}/remotive.parquet"
+    df.to_parquet(path, index=False)
+    upload_to_s3(path, f"{DYNAMIC_SOURCES_PREFIX}remotive/remotive.parquet", cleanup=True)
 
 def scrape_adzuna():
     url = "https://api.adzuna.com/v1/api/jobs/us/search/1"
@@ -179,67 +185,45 @@ def scrape_adzuna():
                 "location": job.get("location", {}).get("display_name", ""),
                 "url": job.get("redirect_url", "")} for job in data]
     df = pd.DataFrame(records)
-    df.to_parquet(f"{LOCAL_DATA_FOLDER}/adzuna.parquet", index=False)
-    upload_to_s3(f"{LOCAL_DATA_FOLDER}/adzuna.parquet", "dynamic_updates/adzuna/adzuna.parquet", cleanup=False)
+    path = f"{LOCAL_DATA_FOLDER}/adzuna.parquet"
+    df.to_parquet(path, index=False)
 
-# ---------------- Merging, Embeddings, FAISS ----------------
+    upload_to_s3(path, f"{DYNAMIC_SOURCES_PREFIX}adzuna/adzuna.parquet", cleanup=True)
 
+# ----------------- Merging & Hash Checking -----------------
 def merge_all_sources_and_save():
-    # Load all cleaned and dynamic data
     df_glassdoor = pd.read_parquet(LOCAL_CLEAN_FILE)
     df_glassdoor['description'] = df_glassdoor['content']
     df_glassdoor['tags'] = ""
     df_glassdoor['url'] = ""
     df_glassdoor['source'] = "glassdoor"
-    df_glassdoor = df_glassdoor.rename(columns={"firm": "company"})
     df_glassdoor = df_glassdoor[["job_title", "company", "description", "tags", "url", "source"]]
 
     df_remoteok = pd.read_parquet(f"{LOCAL_DATA_FOLDER}/remoteok.parquet")
     df_remotive = pd.read_parquet(f"{LOCAL_DATA_FOLDER}/remotive.parquet")
     df_adzuna = pd.read_parquet(f"{LOCAL_DATA_FOLDER}/adzuna.parquet")
 
-    for df in [df_remoteok, df_remotive, df_adzuna]:
-        df["source"] = df.get("source", df.__class__.__name__.lower())
-        if "tags" not in df.columns:
-            df["tags"] = ""
-        if "url" not in df.columns:
-            df["url"] = ""
-
     df_merged = pd.concat([df_glassdoor, df_remoteok, df_remotive, df_adzuna], ignore_index=True)
-
-    # Save as parquet instead of CSV
-    LOCAL_MERGED_PARQUET = f"{LOCAL_DATA_FOLDER}/merged_jobs.parquet"
     df_merged.to_parquet(LOCAL_MERGED_PARQUET, index=False)
-
     upload_to_s3(LOCAL_MERGED_PARQUET, "features/merged_jobs.parquet")
 
-    # Calculate hash based on parquet file
-    with open(LOCAL_MERGED_PARQUET, "rb") as f:
-        hash_val = file_md5(LOCAL_MERGED_PARQUET)
+    hash_val = file_md5(LOCAL_MERGED_PARQUET)
     with open(LOCAL_HASH_FILE, "w") as f:
         f.write(hash_val)
     upload_to_s3(LOCAL_HASH_FILE, "features/merged_jobs.hash")
-
-    print("Merged dataset and hash uploaded to S3 in Parquet format.")
-
 
 def check_if_new_data():
     try:
         download_from_s3("features/merged_jobs.hash", LOCAL_HASH_FILE)
         existing_hash = open(LOCAL_HASH_FILE).read()
-        new_hash = file_md5(LOCAL_MERGED_CSV)
-        if existing_hash == new_hash:
-            print("Data unchanged.")
-            return False
-        else:
-            print("Data changed.")
-            return True
+        new_hash = file_md5(LOCAL_MERGED_PARQUET)
+        return existing_hash != new_hash
     except:
-        print("No existing hash found. Assuming first run.")
         return True
 
+# ----------------- Embeddings & FAISS -----------------
 def generate_and_cache_embeddings():
-    df = pd.read_csv(LOCAL_MERGED_CSV)
+    df = pd.read_parquet(LOCAL_MERGED_PARQUET)
     df["content"] = df["description"].astype(str) + " Tags: " + df["tags"].astype(str)
     df = df[df["content"].str.strip() != ""]
     model = SentenceTransformer('all-MiniLM-L6-v2')
@@ -248,7 +232,6 @@ def generate_and_cache_embeddings():
     df[["job_title", "company", "url"]].to_csv(LOCAL_METADATA, index=False)
     upload_to_s3(LOCAL_EMBEDDINGS, "features/embeddings.npy")
     upload_to_s3(LOCAL_METADATA, "features/metadata.csv")
-    print("Embeddings and metadata uploaded to features/")
 
 def build_faiss_index():
     embeddings = np.load(LOCAL_EMBEDDINGS)
@@ -257,4 +240,25 @@ def build_faiss_index():
     index.add(embeddings)
     faiss.write_index(index, LOCAL_FAISS_INDEX)
     upload_to_s3(LOCAL_FAISS_INDEX, "models/faiss_index.bin")
-    print("FAISS index uploaded to models/")
+
+# ----------------- Recommendation -----------------
+def load_faiss_and_metadata():
+    index = faiss.read_index(LOCAL_FAISS_INDEX)
+    metadata = pd.read_csv(LOCAL_METADATA)
+    return index, metadata
+
+def recommend_jobs_faiss(user_query, top_n=5):
+    index, metadata = load_faiss_and_metadata()
+    model = SentenceTransformer('all-MiniLM-L6-v2')
+    user_embedding = model.encode([user_query])
+    faiss.normalize_L2(user_embedding)
+    D, I = index.search(user_embedding, top_n)
+    recommendations = metadata.iloc[I[0]].copy()
+    recommendations['score'] = D[0]
+    return recommendations
+
+def recommend_jobs_task():
+    user_query = "Software Engineer remote flexible work"
+    recommendations = recommend_jobs_faiss(user_query)
+    print("✅ Recommended Jobs:\n", recommendations[["job_title", "company", "url", "score"]])
+
