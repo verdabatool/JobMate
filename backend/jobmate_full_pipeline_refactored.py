@@ -34,12 +34,45 @@ LOCAL_EMBEDDINGS = f"{LOCAL_DATA_FOLDER}/embeddings.npy"
 LOCAL_METADATA = f"{LOCAL_DATA_FOLDER}/metadata.csv"
 LOCAL_FAISS_INDEX = f"{LOCAL_DATA_FOLDER}/faiss_index.bin"
 
-# ----------------- Utilities -----------------
+RAW_KEY = "raw/glassdoor_reviews.csv"
+CLEANED_KEY = "processed/glassdoor_cleaned.parquet"
+SCRAPED_KEY_PREFIX = "dynamic_updates/remoteok/remoteok.parquet"  # Example, we'll use last_modified
+
+
 def s3_client():
     return boto3.client('s3',
                         aws_access_key_id=AWS_ACCESS_KEY_ID,
                         aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
                         region_name=AWS_REGION)
+
+
+def check_glassdoor_data():
+    s3 = s3_client()
+    try:
+        s3.head_object(Bucket=S3_BUCKET, Key=RAW_KEY)
+        s3.head_object(Bucket=S3_BUCKET, Key=CLEANED_KEY)
+        print("✅ Both raw & cleaned Glassdoor data present.")
+        return False  # Skip Kaggle tasks
+    except:
+        print("⚠️ Glassdoor raw or cleaned data missing. Will download & clean.")
+        return True  # Proceed to download & clean
+
+def check_if_scraping_needed():
+    s3 = s3_client()
+    try:
+        obj = s3.head_object(Bucket=S3_BUCKET, Key=SCRAPED_KEY_PREFIX)
+        last_modified = obj['LastModified']
+        days_since = (datetime.utcnow() - last_modified.replace(tzinfo=None)).days
+        print(f"✅ Last scraping was {days_since} days ago.")
+        if days_since >= 15:
+            print("⚠️ More than 15 days since last scraping. Will scrape & update data.")
+            return True  # Scrape new
+        else:
+            print("✅ Scraping still fresh (<15 days). Will use existing data.")
+            return False  # Skip scraping, use existing data
+    except:
+        print("⚠️ Scraping files not found. Will scrape & update data.")
+        return True  # First run case
 
 def upload_to_s3(local_file, s3_key, cleanup=False):
     s3 = s3_client()
