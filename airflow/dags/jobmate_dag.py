@@ -24,7 +24,7 @@ from backend.jobmate_full_pipeline_refactored import (
 default_args = {
     'owner': 'jobmate_team',
     'retries': 2,
-    'retry_delay': timedelta(minutes=2),
+    'retry_delay': timedelta(minutes=1),
 }
 
 with DAG(
@@ -87,6 +87,7 @@ with DAG(
     task_generate_embeddings = PythonOperator(
         task_id='generate_and_cache_embeddings',
         python_callable=generate_and_cache_embeddings,
+        execution_timeout=timedelta(hours=6)
     )
 
     task_build_faiss = PythonOperator(

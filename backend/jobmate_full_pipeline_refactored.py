@@ -10,6 +10,7 @@ from sentence_transformers import SentenceTransformer
 from bs4 import BeautifulSoup
 from kaggle.api.kaggle_api_extended import KaggleApi
 
+
 # ----------------- Config & Paths -----------------
 S3_BUCKET = os.getenv("S3_BUCKET_NAME")
 AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
@@ -136,6 +137,7 @@ def download_from_kaggle():
         df = pd.read_csv(csv_file, engine='python', on_bad_lines='skip', encoding='utf-8')
     except UnicodeDecodeError:
         df = pd.read_csv(csv_file, engine='python', on_bad_lines='skip', encoding='latin1')
+        df = df.head(100)  # For testing, remove this line in production
 
 def upload_raw_to_s3():
     if not os.path.isfile(LOCAL_RAW_FILE):
@@ -151,6 +153,7 @@ def clean_glassdoor_data_and_upload_to_s3():
             raise FileNotFoundError(f"File {LOCAL_RAW_FILE} does not exist. files in {LOCAL_DATA_FOLDER}: {os.listdir(LOCAL_DATA_FOLDER)}")
 
         df = pd.read_csv(LOCAL_RAW_FILE, engine='python', on_bad_lines='skip', encoding='latin1')
+        df = df.head(100)  # For testing, remove this line in production
         df = df[['job_title', 'firm', 'pros', 'cons']].dropna()
         df['job_title'] = df['job_title'].astype(str).str.strip()
         df['pros'] = df['pros'].str.strip()
@@ -296,7 +299,7 @@ def generate_and_cache_embeddings():
     df["content"] = df["description"].astype(str) + " Tags: " + df["tags"].astype(str)
     df = df[df["content"].str.strip() != ""]
     model = SentenceTransformer('all-MiniLM-L6-v2')
-    embeddings = model.encode(df["content"].tolist(), batch_size=128, show_progress_bar=True)
+    embeddings = model.encode(df["content"].tolist(), batch_size=64, show_progress_bar=True)
     np.save(LOCAL_EMBEDDINGS, embeddings)
     df[["job_title", "company", "url"]].to_csv(LOCAL_METADATA, index=False)
     upload_to_s3(LOCAL_EMBEDDINGS, "features/embeddings.npy")
