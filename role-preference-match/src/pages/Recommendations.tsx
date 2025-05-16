@@ -131,7 +131,7 @@ const Recommendations = () => {
     setSearchParams(parsed);
     setIsLoading(true);
 
-    fetch('http://localhost:5003/recommendations', {
+    fetch('http://localhost:5005/recommendations', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
